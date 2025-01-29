@@ -8,6 +8,7 @@ const Timer = struct {
 
 memory: [1024 * 4]u8 = [1]u8{0} ** (1024 * 4),
 registers: [16]u8 = [1]u8{0} ** 16,
+display: [DISPLAY_HEIGHT * DISPLAY_WIDTH]u8 = [1]u8{' '} ** (DISPLAY_HEIGHT * DISPLAY_WIDTH),
 
 delay_timer: Timer = .{},
 sound_timer: Timer = .{},
@@ -19,6 +20,8 @@ execute_cursor: u16 = 0,
 stack_core: [STACK_SIZE]u16 = [1]u16{0} ** (STACK_SIZE),
 stack_write_pointer: u8 = 0,
 
+const DISPLAY_HEIGHT = 32;
+const DISPLAY_WIDTH = 64;
 const STACK_SIZE: u16 = 16;
 const ETI_PROGRAM_START: u16 = 0x600;
 const PROGRAM_START: u16 = 0x200;
@@ -152,7 +155,7 @@ pub fn init(program_bytes: []const u8) !Emulator {
 
     // initialize some values
     const program = emu.memory[emu.execute_cursor..];
-    std.mem.copyForwards(u8, &emu.memory, &FONT_SET);
+    std.mem.copyForwards(u8, emu.memory[0x50..0xA0], &FONT_SET);
     std.mem.copyForwards(u8, program, program_bytes);
 
     return emu;
@@ -195,12 +198,29 @@ const Y_FILTER: u16 = LOW_BYTE_UPPER_BITS_FILTER;
 const Y_SHIFT: u16 = 4;
 const KK_FILTER: u16 = LOW_BYTE_LOWER_BITS_FILTER | LOW_BYTE_UPPER_BITS_FILTER;
 
+fn printDisplay(self: *Emulator, writer: anytype) void {
+    for (0..DISPLAY_HEIGHT) |y| {
+        const data = self.display[y * DISPLAY_WIDTH .. ((y + 1) * DISPLAY_WIDTH)];
+
+        _ = writer.write(data) catch unreachable;
+        _ = writer.write("-\n") catch unreachable;
+    }
+    _ = writer.write("-" ** DISPLAY_WIDTH ++ "\n") catch unreachable;
+}
+
+fn clearDisplay(self: *Emulator) void {
+    for (&self.display) |*pixel| {
+        pixel.* = ' ';
+    }
+}
+
 pub fn executeLoop(self: *Emulator) void {
     std.log.info("HELLO", .{});
 
     var timer = std.time.Timer.start() catch @panic("No time");
+    var writer = std.io.getStdOut().writer();
+
     while (self.next()) |instruction_bytes| {
-        timer.reset();
         if (findInstruction(instruction_bytes)) |instruction| {
             switch (instruction.type) {
                 .CLS => {
@@ -223,7 +243,46 @@ pub fn executeLoop(self: *Emulator) void {
                     self.memory_index = instruction.nnn;
                 },
                 .DRW_VX_VY_N => {
-                    std.log.info("Supposed to draw to screen", .{});
+                    const data = self.memory[self.memory_index..(self.memory_index + instruction.n)];
+
+                    const vx = self.registers[instruction.x] % DISPLAY_WIDTH;
+                    const vy = self.registers[instruction.y] % DISPLAY_HEIGHT;
+
+                    self.registers[0xF] = 0;
+
+                    for (data, 0..) |byte, count| {
+                        if ((vy + count) >= DISPLAY_HEIGHT) {
+                            break;
+                        }
+
+                        const y = (vy + count) * DISPLAY_WIDTH;
+
+                        inline for (0..8) |offset| {
+                            const bit = byte & (1 << (7 - offset));
+
+                            if (bit != 0) {
+                                if (vx + offset >= DISPLAY_WIDTH) {
+                                    break;
+                                }
+
+                                const x = vx + offset;
+
+                                const position = x + y;
+                                const value = self.display[position];
+
+                                if (value == '#') {
+                                    self.registers[0xF] = 1;
+                                    self.display[position] = ' ';
+                                } else {
+                                    self.display[position] = '#';
+                                }
+                            }
+                        }
+                    }
+
+                    std.log.info("{} {}", .{ vx, vy });
+
+                    self.printDisplay(&writer);
                 },
                 else => {},
             }
@@ -234,8 +293,12 @@ pub fn executeLoop(self: *Emulator) void {
         self.handleTimers() catch |err| {
             std.log.err("We failed to get the current time stamp {}.", .{err});
         };
+        const time = timer.read();
 
-        std.Thread.sleep((std.time.ns_per_s / 950) - timer.read());
+        if (time < std.time.ns_per_s / 700) {
+            std.Thread.sleep((std.time.ns_per_s / 700) - time);
+        }
+        timer.reset();
     } else {
         std.log.info("Reached the end of the program.", .{});
     }
