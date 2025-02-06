@@ -6,7 +6,9 @@ const Timer = struct {
     last_tick: ?std.time.Instant = null,
 };
 
-memory: [1024 * 4]u8 = [1]u8{0} ** (1024 * 4),
+memory: [1024 * 4]u8 align(16) = [1]u8{0} ** (1024 * 4),
+memory_s: []u8 align(16) = undefined,
+program_memory: []u16 = undefined,
 registers: [16]u8 = [1]u8{0} ** 16,
 display: [DISPLAY_HEIGHT * DISPLAY_WIDTH]u8 = [1]u8{' '} ** (DISPLAY_HEIGHT * DISPLAY_WIDTH),
 
@@ -17,7 +19,7 @@ memory_index: u16 = 0,
 execute_cursor: u16 = 0,
 
 // NOT A MEMORY STACK BUT RATHER A RETURN ADDRESS STACK!!!!
-stack_core: [STACK_SIZE]u16 = [1]u16{0} ** (STACK_SIZE),
+stack: [STACK_SIZE]u16 = [1]u16{0} ** (STACK_SIZE),
 stack_write_pointer: u8 = 0,
 
 const DISPLAY_HEIGHT = 32;
@@ -27,87 +29,12 @@ const ETI_PROGRAM_START: u16 = 0x600;
 const PROGRAM_START: u16 = 0x200;
 
 const Instruction = struct {
-    type: InstructionsType,
+    code: u16,
     nnn: u16,
     n: u8,
     x: u8,
     y: u8,
     kk: u8,
-};
-
-const InstructionsType = enum(u16) {
-    // SYS_ADDR = 0x0000, // Ignored by modern interpreters
-    CLS = 0x00E0,
-    RET = 0x00EE,
-    JP_ADDR = 0x1000,
-    CALL_ADDR = 0x2000,
-    SE_VX_KK = 0x3000,
-    SNE_VX_KK = 0x4000,
-    SE_VX_VY = 0x5000,
-    LD_VX_KK = 0x6000,
-    ADD_VX_KK = 0x7000,
-    LD_VX_VY = 0x8000,
-    OR_VX_VY = 0x8001,
-    AND_VX_VY = 0x8002,
-    XOR_VX_VY = 0x8003,
-    ADD_VX_VY = 0x8004,
-    SUB_VX_VY = 0x8005,
-    SHR_VX = 0x8006,
-    SUBN_VX_VY = 0x8007,
-    SHL_VX = 0x800E,
-    SNE_VX_VY = 0x9000,
-    LD_I_ADDR = 0xA000,
-    JP_V0_ADDR = 0xB000,
-    RND_VX_KK = 0xC000,
-    DRW_VX_VY_N = 0xD000,
-    SKP_VX = 0xE09E,
-    SKNP_VX = 0xE0A1,
-    LD_VX_DT = 0xF007,
-    LD_VX_K = 0xF00A,
-    LD_DT_VX = 0xF015,
-    LD_ST_VX = 0xF018,
-    ADD_I_VX = 0xF01E,
-    LD_F_VX = 0xF029,
-    LD_BCD_VX = 0xF033,
-    LD_MEM_I_VX = 0xF055,
-    LD_VX_MEM_I = 0xF065,
-};
-
-const REVERSE_INST = [_]InstructionsType{
-    .LD_VX_MEM_I,
-    .LD_MEM_I_VX,
-    .LD_BCD_VX,
-    .LD_F_VX,
-    .ADD_I_VX,
-    .LD_ST_VX,
-    .LD_DT_VX,
-    .LD_VX_K,
-    .LD_VX_DT,
-    .SKNP_VX,
-    .SKP_VX,
-    .DRW_VX_VY_N,
-    .RND_VX_KK,
-    .JP_V0_ADDR,
-    .LD_I_ADDR,
-    .SNE_VX_VY,
-    .SHL_VX,
-    .SUBN_VX_VY,
-    .SHR_VX,
-    .SUB_VX_VY,
-    .ADD_VX_VY,
-    .XOR_VX_VY,
-    .AND_VX_VY,
-    .OR_VX_VY,
-    .LD_VX_VY,
-    .ADD_VX_KK,
-    .LD_VX_KK,
-    .SE_VX_VY,
-    .SNE_VX_KK,
-    .SE_VX_KK,
-    .CALL_ADDR,
-    .JP_ADDR,
-    .RET,
-    .CLS,
 };
 
 const FONT_SET: [80]u8 = [_]u8{
@@ -144,6 +71,8 @@ const FONT_SET: [80]u8 = [_]u8{
     // "F"
     0xF0, 0x80, 0xF0, 0x80, 0x80,
 };
+const FONT_MEMORY_LOCATION = 0x50;
+const FONT_SPRITE_SIZE = 5;
 
 pub fn init(program_bytes: []const u8) !Emulator {
     // decide if program is ETI or STANDARD
@@ -154,9 +83,17 @@ pub fn init(program_bytes: []const u8) !Emulator {
     };
 
     // initialize some values
-    const program = emu.memory[emu.execute_cursor..];
-    std.mem.copyForwards(u8, emu.memory[0x50..0xA0], &FONT_SET);
+    const program = emu.memory[start..];
+    std.mem.copyForwards(u8, emu.memory[FONT_MEMORY_LOCATION..0xA0], &FONT_SET);
     std.mem.copyForwards(u8, program, program_bytes);
+    const byte_mem_prog: [*]u8 align(16) = &emu.memory;
+    const program_pointer: [*]u16 = @ptrCast(@alignCast(byte_mem_prog));
+    emu.memory_s = &emu.memory;
+    emu.program_memory = program_pointer[0..@divTrunc(emu.memory.len, 2)];
+
+    // for (emu.memory, emu.memory_s) |i, b| {
+    //     std.debug.assert(i == b);
+    // }
 
     return emu;
 }
@@ -198,6 +135,8 @@ const Y_FILTER: u16 = LOW_BYTE_UPPER_BITS_FILTER;
 const Y_SHIFT: u16 = 4;
 const KK_FILTER: u16 = LOW_BYTE_LOWER_BITS_FILTER | LOW_BYTE_UPPER_BITS_FILTER;
 
+const VF = 0xF;
+
 fn printDisplay(self: *Emulator, writer: anytype) void {
     for (0..DISPLAY_HEIGHT) |y| {
         const data = self.display[y * DISPLAY_WIDTH .. ((y + 1) * DISPLAY_WIDTH)];
@@ -208,10 +147,8 @@ fn printDisplay(self: *Emulator, writer: anytype) void {
     _ = writer.write("-" ** DISPLAY_WIDTH ++ "\n") catch unreachable;
 }
 
-fn clearDisplay(self: *Emulator) void {
-    for (&self.display) |*pixel| {
-        pixel.* = ' ';
-    }
+fn clearDisplay(writer: anytype) void {
+    _ = writer.write("\x1B[2J\x1B[H") catch unreachable;
 }
 
 pub fn executeLoop(self: *Emulator) void {
@@ -219,36 +156,174 @@ pub fn executeLoop(self: *Emulator) void {
 
     var timer = std.time.Timer.start() catch @panic("No time");
     var writer = std.io.getStdOut().writer();
+    var randomizer = std.Random.DefaultPrng.init(0);
+    var random = randomizer.random();
 
-    while (self.next()) |instruction_bytes| {
+    while (self.currentInstruction()) |instruction_bytes| : (self.advanceCursor()) {
         if (findInstruction(instruction_bytes)) |instruction| {
-            switch (instruction.type) {
-                .CLS => {
-                    std.log.info("Supposed to clear screen", .{});
+            switch (instruction.code) {
+                0x00E0 => {
+                    clearDisplay(writer);
                 },
-                .JP_ADDR => {
+                0x00EE => {
+                    self.execute_cursor = (self.popAddress() catch unreachable);
+                },
+                0x1000...0x1FFF => {
+                    self.execute_cursor = instruction.nnn - INSTRUCTION_STEP;
+                },
+                0x2000...0x2FFF => {
+                    self.pushAddress() catch unreachable;
                     self.execute_cursor = instruction.nnn;
                 },
-                .LD_VX_K => {
-                    self.execute_cursor -= INSTRUCTION_STEP;
-                    std.log.info("Waiting for input", .{});
+                0x3000...0x3FFF => {
+                    if (self.registers[instruction.x] == instruction.kk) {
+                        self.advanceCursor();
+                    }
                 },
-                .LD_VX_KK => {
+                0x4000...0x4FFF => {
+                    if (self.registers[instruction.x] != instruction.kk) {
+                        self.advanceCursor();
+                    }
+                },
+                0x5000...0x5FF0 => {
+                    if (self.registers[instruction.x] == self.registers[instruction.x]) {
+                        self.advanceCursor();
+                    }
+                },
+                0x6000...0x6FFF => {
                     self.registers[instruction.x] = instruction.kk;
                 },
-                .ADD_VX_KK => {
+                0x7000...0x7FFF => {
                     self.registers[instruction.x] += instruction.kk;
                 },
-                .LD_I_ADDR => {
+                0x8000...0x8FF0 => {
+                    switch (instruction.n) {
+                        0x0 => self.registers[instruction.x] = self.registers[instruction.y],
+                        0x1 => self.registers[instruction.x] |= self.registers[instruction.y],
+                        0x2 => self.registers[instruction.x] &= self.registers[instruction.y],
+                        0x3 => self.registers[instruction.x] ^= self.registers[instruction.y],
+                        0x4 => {
+                            const a = self.registers[instruction.x];
+                            const b = self.registers[instruction.y];
+                            self.registers[VF] = 0;
+
+                            self.registers[instruction.x] += self.registers[instruction.y];
+                            if (a > std.math.maxInt(u8) - b) {
+                                self.registers[VF] = 1;
+                            }
+                        },
+                        0x5 => {
+                            const a = self.registers[instruction.x];
+                            const b = self.registers[instruction.y];
+                            self.registers[VF] = 0;
+
+                            self.registers[instruction.x] -= self.registers[instruction.y];
+
+                            if (a > b) {
+                                self.registers[VF] = 1;
+                            }
+                        },
+                        0x6 => {
+                            self.registers[VF] = self.registers[instruction.x] & 1;
+                            self.registers[instruction.x] = self.registers[instruction.x] >> 1;
+                        },
+                        0x7 => {
+                            const a = self.registers[instruction.x];
+                            const b = self.registers[instruction.y];
+                            self.registers[VF] = 0;
+
+                            self.registers[instruction.y] -= self.registers[instruction.x];
+
+                            if (b > a) {
+                                self.registers[VF] = 1;
+                            }
+                        },
+                        0xE => {
+                            self.registers[VF] = self.registers[instruction.x] & (1 << 7);
+                            self.registers[instruction.x] = self.registers[instruction.x] << 1;
+                        },
+                        else => unreachable,
+                    }
+                },
+                0x9000...0x9FFF => {
+                    if (self.registers[instruction.x] != self.registers[instruction.y]) {
+                        self.advanceCursor();
+                    }
+                },
+                0xA000...0xAFFF => {
                     self.memory_index = instruction.nnn;
                 },
-                .DRW_VX_VY_N => {
+                0xB000...0xBFFF => {
+                    self.execute_cursor = self.registers[0] + instruction.nnn;
+                },
+                0xC000...0xCFFF => {
+                    self.registers[instruction.x] = random.int(u8) & instruction.kk;
+                },
+                0xE09E...0xEF9E => {
+                    switch (instruction.kk) {
+                        0x9E => {
+                            // TODO{metty}: WHEN WE READ INPUT
+                            std.log.info("Have yet to support input", .{});
+                        },
+                        0xA1 => {
+                            // TODO{metty}: WHEN WE READ INPUT
+                            std.log.info("Have yet to support input", .{});
+                        },
+                        else => unreachable,
+                    }
+                },
+                0xF000...0xFFFF => {
+                    switch (instruction.kk) {
+                        0x07 => {
+                            self.registers[instruction.x] = self.delay_timer.counter;
+                        },
+                        0x0A => {
+                            // TODO{metty}: WHEN WE READ INPUT
+                            self.execute_cursor -= INSTRUCTION_STEP;
+                            std.log.info("Waiting for input", .{});
+                        },
+                        0x15 => {
+                            self.delay_timer.counter = self.registers[instruction.x];
+                        },
+                        0x18 => {
+                            self.sound_timer.counter = self.registers[instruction.x];
+                        },
+                        0x1E => {
+                            self.memory_index += self.registers[instruction.x];
+                        },
+                        0x29 => {
+                            self.memory_index = FONT_MEMORY_LOCATION + (self.registers[instruction.x] * FONT_SPRITE_SIZE);
+                        },
+                        0x33 => {
+                            const number = self.registers[instruction.x];
+                            const hundreds = @divFloor(number, 100);
+                            const tens = @divFloor(number - hundreds, 10);
+                            const ones = number - (hundreds + tens);
+
+                            self.memory[self.memory_index + 0] = hundreds;
+                            self.memory[self.memory_index + 1] = tens;
+                            self.memory[self.memory_index + 2] = ones;
+                        },
+                        0x55 => {
+                            for (0..instruction.x + 1) |i| {
+                                self.memory[self.memory_index + i] = self.registers[i];
+                            }
+                        },
+                        0x65 => {
+                            for (0..instruction.x + 1) |i| {
+                                self.registers[i] = self.memory[self.memory_index + i];
+                            }
+                        },
+                        else => unreachable,
+                    }
+                },
+                0xD000...0xDFFF => {
                     const data = self.memory[self.memory_index..(self.memory_index + instruction.n)];
 
                     const vx = self.registers[instruction.x] % DISPLAY_WIDTH;
                     const vy = self.registers[instruction.y] % DISPLAY_HEIGHT;
 
-                    self.registers[0xF] = 0;
+                    self.registers[VF] = 0;
 
                     for (data, 0..) |byte, count| {
                         if ((vy + count) >= DISPLAY_HEIGHT) {
@@ -271,7 +346,7 @@ pub fn executeLoop(self: *Emulator) void {
                                 const value = self.display[position];
 
                                 if (value == '#') {
-                                    self.registers[0xF] = 1;
+                                    self.registers[VF] = 1;
                                     self.display[position] = ' ';
                                 } else {
                                     self.display[position] = '#';
@@ -280,11 +355,13 @@ pub fn executeLoop(self: *Emulator) void {
                         }
                     }
 
-                    std.log.info("{} {}", .{ vx, vy });
-
+                    clearDisplay(writer);
                     self.printDisplay(&writer);
                 },
-                else => {},
+                else => {
+                    std.log.info("{} {}", .{ instruction_bytes, self.execute_cursor });
+                    unreachable;
+                },
             }
         } else |err| {
             std.log.err("Illegal Instruction Found {}.", .{err});
@@ -304,14 +381,21 @@ pub fn executeLoop(self: *Emulator) void {
     }
 }
 
-fn next(self: *Emulator) ?u16 {
-    const upper: u16 = self.memory[self.execute_cursor];
-    self.execute_cursor += 1;
-    const lower: u16 = self.memory[self.execute_cursor];
-    self.execute_cursor += 1;
+fn currentInstruction(self: *Emulator) ?u16 {
+    const upper: u16 = self.memory_s[self.execute_cursor];
+    const lower: u16 = self.memory_s[self.execute_cursor + 1];
 
-    const instruction = (upper << 8) | lower;
-    return instruction;
+    std.log.info("{} {}", .{ self.execute_cursor, self.execute_cursor + 1 });
+    std.debug.assert(self.memory[self.execute_cursor] == self.memory_s[self.execute_cursor]);
+    std.debug.assert(self.memory[self.execute_cursor + 1] == self.memory_s[self.execute_cursor + 1]);
+
+    const oldinstruction = (upper << 8) | lower;
+
+    return oldinstruction;
+}
+
+fn advanceCursor(self: *Emulator) void {
+    self.execute_cursor += INSTRUCTION_STEP;
 }
 
 fn findInstruction(instruction: u16) !Instruction {
@@ -321,38 +405,27 @@ fn findInstruction(instruction: u16) !Instruction {
     const y: u8 = @intCast((instruction & Y_FILTER) >> Y_SHIFT);
     const kk: u8 = @intCast(instruction & KK_FILTER);
 
-    inline for (REVERSE_INST) |field| {
-        const instruction_enum: u16 = @intFromEnum(field);
-        const instruction_byte: u16 = (instruction_enum & instruction);
-
-        if (instruction_byte == instruction_enum) {
-            const instructionsType: InstructionsType = @enumFromInt(instruction_enum);
-
-            return .{
-                .type = instructionsType,
-                .nnn = nnn,
-                .n = n,
-                .x = x,
-                .y = y,
-                .kk = kk,
-            };
-        }
-    }
-
-    return error.InvalidInstruction;
+    return .{
+        .code = instruction,
+        .nnn = nnn,
+        .n = n,
+        .x = x,
+        .y = y,
+        .kk = kk,
+    };
 }
 
-fn pushAddress(self: *Emulator, address: u16) !void {
+fn pushAddress(self: *Emulator) !void {
     if (self.stack_write_pointer == STACK_SIZE + 1) {
         return error.StackOverflow;
     }
 
-    self.stack[self.stack_write_pointer] = address;
+    self.stack[self.stack_write_pointer] = self.execute_cursor;
     self.stack_write_pointer += 1;
 }
 
 fn popAddress(self: *Emulator) !u16 {
-    if (self.stack_write_pointer == 1) {
+    if (self.stack_write_pointer == 0) {
         return error.EmptyStack;
     }
 
@@ -361,7 +434,7 @@ fn popAddress(self: *Emulator) !u16 {
 }
 
 fn peekAddress(self: *Emulator) ?u8 {
-    if (self.stack_write_pointer == 1) {
+    if (self.stack_write_pointer == 0) {
         return error.EmptyStack;
     }
 
