@@ -8,7 +8,6 @@ const Timer = struct {
 
 memory: [1024 * 4]u8 align(16) = [1]u8{0} ** (1024 * 4),
 memory_s: []u8 align(16) = undefined,
-program_memory: []u16 = undefined,
 registers: [16]u8 = [1]u8{0} ** 16,
 display: [DISPLAY_HEIGHT * DISPLAY_WIDTH]u8 = [1]u8{' '} ** (DISPLAY_HEIGHT * DISPLAY_WIDTH),
 
@@ -86,10 +85,7 @@ pub fn init(program_bytes: []const u8) !Emulator {
     const program = emu.memory[start..];
     std.mem.copyForwards(u8, emu.memory[FONT_MEMORY_LOCATION..0xA0], &FONT_SET);
     std.mem.copyForwards(u8, program, program_bytes);
-    const byte_mem_prog: [*]u8 align(16) = &emu.memory;
-    const program_pointer: [*]u16 = @ptrCast(@alignCast(byte_mem_prog));
     emu.memory_s = &emu.memory;
-    emu.program_memory = program_pointer[0..@divTrunc(emu.memory.len, 2)];
 
     // for (emu.memory, emu.memory_s) |i, b| {
     //     std.debug.assert(i == b);
