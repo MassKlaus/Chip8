@@ -6,8 +6,7 @@ const Timer = struct {
     last_tick: ?std.time.Instant = null,
 };
 
-memory: [1024 * 4]u8 align(16) = [1]u8{0} ** (1024 * 4),
-memory_s: []u8 align(16) = undefined,
+memory: [1024 * 4]u8 = [1]u8{0} ** (1024 * 4),
 registers: [16]u8 = [1]u8{0} ** 16,
 display: [DISPLAY_HEIGHT * DISPLAY_WIDTH]u8 = [1]u8{' '} ** (DISPLAY_HEIGHT * DISPLAY_WIDTH),
 
@@ -85,11 +84,6 @@ pub fn init(program_bytes: []const u8) !Emulator {
     const program = emu.memory[start..];
     std.mem.copyForwards(u8, emu.memory[FONT_MEMORY_LOCATION..0xA0], &FONT_SET);
     std.mem.copyForwards(u8, program, program_bytes);
-    emu.memory_s = &emu.memory;
-
-    // for (emu.memory, emu.memory_s) |i, b| {
-    //     std.debug.assert(i == b);
-    // }
 
     return emu;
 }
@@ -378,16 +372,14 @@ pub fn executeLoop(self: *Emulator) void {
 }
 
 fn currentInstruction(self: *Emulator) ?u16 {
-    const upper: u16 = self.memory_s[self.execute_cursor];
-    const lower: u16 = self.memory_s[self.execute_cursor + 1];
+    // const upper: u16 = self.memory_s[self.execute_cursor];
+    // const lower: u16 = self.memory_s[self.execute_cursor + 1];
+    // const oldinstruction = (upper << 8) | lower;
 
-    std.log.info("{} {}", .{ self.execute_cursor, self.execute_cursor + 1 });
-    std.debug.assert(self.memory[self.execute_cursor] == self.memory_s[self.execute_cursor]);
-    std.debug.assert(self.memory[self.execute_cursor + 1] == self.memory_s[self.execute_cursor + 1]);
+    const program_pointer: [*]u16 = @ptrCast(@alignCast(&(self.memory)));
+    const instruction = @byteSwap(program_pointer[self.execute_cursor / 2]);
 
-    const oldinstruction = (upper << 8) | lower;
-
-    return oldinstruction;
+    return instruction;
 }
 
 fn advanceCursor(self: *Emulator) void {
